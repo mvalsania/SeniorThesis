@@ -2,114 +2,141 @@
 
 ## 1. Epidemic Threshold Computation
 
-For calculating the null and alternative hypothesis proportions of ILI in the community, we estimate the baseline and epidemic threshold for the percentage of the population with ILI each week. We use the following parameters:
+To estimate the null (baseline) and alternative (epidemic) proportions of influenza‐like illness (ILI) in the community, we compute weekly per‐person probabilities using ED‐visit data and treatment‐seeking rates. All model parameters are treated as hyperparameters in our `estimate_required_sample_sizes()` function (Appendix A) and the accompanying Shiny app, allowing users to override defaults.
 
-* **pop**: Total population of Los Angeles County.
-* **annual\_ed\_rate**: Annual ED visits per 1,000 people in LA County.
-* **non\_epi\_rate**: Proportion of ED visits due to ILI during non-epidemic weeks.
-* **threshold\_rate**: Proportion of ED visits due to ILI at the epidemic threshold.
-* **ili\_seek\_rate**: Percentage of individuals with ILI who seek ED care.
-* **alpha**: Significance level for sample-size estimation (Type I error rate).
-* **target\_power**: Desired power for sample-size estimation (1 – Type II error rate).
+**Parameters:**
 
-We calculate the baseline rate (`p0`) and epidemic-threshold rate (`p1`) as:
+* `pop`: Total population of Los Angeles County (LA County).
+* `annual_ed_rate`: Annual ED visits per 1,000 people in LA County.
+* `non_epi_rate`: Proportion of ED visits due to ILI during non‐epidemic weeks.
+* `threshold_rate`: Proportion of ED visits due to ILI at the epidemic threshold.
+* `ili_seek_rate`: Percentage of individuals with ILI who seek ED care.
+* `alpha`: Significance level (Type I error rate).
+* `target_power`: Desired power (1 – Type II error rate).
 
-```text
-p0 = ((pop * (annual_ed_rate / 1000)) / 52 * non_epi_rate) / (ili_seek_rate * pop)
-p1 = ((pop * (annual_ed_rate / 1000)) / 52 * threshold_rate) / (ili_seek_rate * pop)
+We derive weekly probabilities *p₀* and *p₁* as follows:
+
+```math
+p₀ = \frac{\bigl( pop \times \frac{annual\_ed\_rate}{1000} \bigr) / 52 \times non\_epi\_rate}{ili\_seek\_rate \times pop},
+\\
+p₁ = \frac{\bigl( pop \times \frac{annual\_ed\_rate}{1000} \bigr) / 52 \times threshold\_rate}{ili\_seek\_rate \times pop}.
 ```
 
-These formulas compute weekly ED visits during "normal" and "influenza" weeks, adjust for the probability of an ILI case seeking ED care, and normalize by the population to obtain individual-level probabilities.
+These compute “normal” vs. “epidemic” weekly ED visits, adjust by care‐seeking probability, and normalize by population.
 
-### Base-case Parameter Values
+### Base‐Case Defaults
 
-| Variable         | Value     |
-| ---------------- | --------- |
-| pop              | 9,825,708 |
-| annual\_ed\_rate | 322       |
-| non\_epi\_rate   | 0.0385    |
-| threshold\_rate  | 0.0540    |
-| ili\_seek\_rate  | 0.019     |
-| alpha            | 0.05      |
-| target\_power    | 0.90      |
+| Parameter        | Default Value | Source / Notes                          |
+| ---------------- | ------------- | --------------------------------------- |
+| `pop`            | 9,825,708     | LACDPH (2023)                           |
+| `annual_ed_rate` | 322           | CHCF ED Almanac (2023)                  |
+| `non_epi_rate`   | 0.0385        | RespWatch mean non‐epidemic (2019–2023) |
+| `threshold_rate` | 0.0540        | Mean + 2 SD non‐epidemic rates          |
+| `ili_seek_rate`  | 0.019         | Flu Near You: 31.6% × ED subset (\~6%)  |
+| `alpha`          | 0.05          | CDC standard                            |
+| `target_power`   | 0.90          | CDC standard                            |
 
-> **Notes:**
->
-> * Population estimate (July 1, 2023): LACDPH
-> * ED visit rate: California Health Care Foundation Emergency Departments Almanac 2023
-> * Baseline & threshold rates: LA County RespWatch (2019–2023)
-> * ILI seek rate: Flu Near You (2016–2019)
+<details>
+<summary>Footnotes & Data Sources</summary>
+
+1. **Population**: LA County population estimate (July 1, 2023). LACDPH.
+2. **Annual ED rate**: 322 visits per 1,000 persons per year. California Health Care Foundation. “Emergency Departments Almanac 2023.”
+3. **Baseline & Threshold**: Derived from LA County RespWatch ILI surveillance data (2019–2023). Non‐epi mean (0.016), threshold = mean + 2 SD (\~0.054).
+4. **ILI seek rate**: Flu Near You crowdsourced symptom reporting (2016–2019). Smolinski *et al.* (2015).
+5. **Alpha / Power**: Conventional outbreak‐detection standards (Type I α=0.05, power=0.90).
+
+</details>
 
 ---
 
 ## 2. Minimum Sample Size Estimation
 
-After defining `p0` and `p1`, we estimate the minimum sample size `n_min` required to detect an increase under the given `alpha` and `target_power`. We use six methods:
+Given *p₀* and *p₁*, we estimate the minimum `n` to detect an increase under (`alpha`, `target_power`) using six one‐sided binomial‐proportion tests:
 
-1. **Exact binomial**
-2. **Wald (Normal)**
-3. **Wilson score**
-4. **Wilson score with continuity correction**
-5. **Jeffreys interval**
-6. **Agresti–Coull interval**
+1. Exact binomial inversion
+2. Normal (Wald) approximation
+3. Wilson score interval
+4. Wilson score + continuity correction
+5. Jeffreys interval
+6. Agresti–Coull interval
 
-### Procedure
+**Procedure:**
 
-1. **Define sample-size range**: Candidate `n` from 1,000 to 12,000 in increments of 100.
-2. **Exact & Wald tests**:
+1. **Range of `n`**: 1,000 to 12,000 (step = 100).
+2. **Exact & Wald** (analytical):
 
-   * Invert the binomial/Normal distribution under the null to find the rejection threshold.
-   * Compute power under the alternative and select the smallest `n` where power ≥ 90 %.
-3. **Wilson, Wilson CC, Jeffreys, Agresti–Coull**:
+   * Under *H₀*(*p₀*), invert distribution to find rejection threshold.
+   * Compute power under *H₁*(*p₁*); select smallest `n` with power ≥ `target_power`.
+3. **Wilson, Jeffreys, Agresti–Coull, ...** (simulation):
 
-   * Simulate 100,000 samples of size `n` from `p1`.
-   * For each sample, compute the observed rate `p̂` and the one-sided 95 % lower confidence bound `L`.
-   * Declare detection if `L > p0`.
-   * Estimate empirical power as the proportion of detections and choose the smallest `n` where power ≥ 90 %.
-4. **Summarize results**: Compile required `n` for each method and visualize power vs. `n`.
+   * For each `n`, draw 100,000 Binomial(`n`, *p₁*) samples.
+   * Compute observed rate $\hat p$ and 95% one‐sided lower bound $L$.
+   * Reject *H₀* if $L > p₀$; empirical power = proportion of rejections.
+   * Choose smallest `n` with empirical power ≥ `target_power`.
+4. **Results**: Tabulate and plot required sample sizes vs. method; annotate power curves and 90% threshold.
 
----
+<details>
+<summary>Appendix A</summary>
+Complete R/Python code for all tests and functions `estimate_required_sample_sizes()` can be found in Appendix A of the thesis repository.
 
-## 3. Synthetic Data Creation
-
-To preserve weekly symptom distributions while enabling individual-level analysis, we generated a synthetic dataset (`SyntheticData.csv`). Key steps:
-
-1. **Reconstruct weekly records**: Generate 1,000 individual responses per week.
-2. **Carry-over respondents**: Retain 90 % of IDs each week; introduce 10 % new IDs.
-3. **Demographic assignment**: Sample age group, race/ethnicity, and ZIP code to match aggregate distributions.
-4. **Date assignment**: Randomly assign each response a date within its week.
-5. **Symptom flags**: Compute binary indicators (`Sick`, `Cough`, `CSTE`, `Both`) ensuring aggregate rates match published data.
+</details>
 
 ---
 
-## 4. Change Point Detection
+## 3. Synthetic Data Generation
 
-We applied the PELT algorithm (via `cpt.meanvar` in the **changepoint** R package) to detect weeks with abrupt changes in mean or variance of the ILI proxy, using BIC as penalty.
+To allow individual‐level analysis while matching weekly aggregates from the LAC DpH Angelenos in Action program, we generated a synthetic dataset (`SyntheticData.csv`).
+
+1. **Weekly records**: 1,000 simulated responses per week.
+2. **Carry‐over IDs**: Retain 90% of prior‐week IDs; introduce 10% new IDs.
+3. **Demographics**:
+
+   * **Age**: Sample from {18–29, 30–39, 40–49, 50–59, 60–69, 70+, Unknown}.
+   * **Race/Ethnicity**: {Asian, Black, Latino, Multi, Native, Other, PI, Unknown, White}.
+   * **ZIP code**: Random draw from LA County ZIP list.
+4. **Response date**: Random date within the 7‐day week window.
+5. **Symptom flags**: Compute binary indicators:
+
+   * `Sick`, `Cough`, `CSTE` (≥2 of fever, chills, sore throat, headache, body ache, loss of taste/smell), `Both` (Cough & CSTE).
+   * Ensure weekly aggregates exactly match published per‐1,000 rates.
+
+See Appendix C for code and Appendix D for the original `AiAData.xlsx` aggregates.
 
 ---
 
-## 5. Cross-correlation Function (CCF)
+## 4. Change‐Point Detection
 
-We computed sample cross-correlation functions among subgroups to explore lead-lag relationships in symptom upticks. Positive correlation at lag *k* indicates Group 1 symptoms precede Group 2 by *k* weeks.
+We applied the Pruned Exact Linear Time (PELT) algorithm using `cpt.meanvar` (R **changepoint** package) to detect weeks with abrupt shifts in mean/variance of the ILI proxy. BIC was used as penalty to prevent overfitting.
+
+<details>
+<summary>Reference</summary>
+Killick, Fearnhead & Eckley (2012), *Journal of the American Statistical Association*; `cpt.meanvar` docs.
+</details>
 
 ---
 
-## 6. Hotspot Analysis (Getis–Ord Gi\*)
+## 5. Cross‐Correlation Function (CCF)
 
-For each ZIP code, we computed:
+Computed sample CCF among subgroups to detect lead‐lag patterns. Significant positive correlations at lag *k* indicate subgroup A symptom spikes precede subgroup B by *k* weeks.
 
-```text
-Gi* = (∑_j w_ij x_j – X̄ ∑_j w_ij) / (σ √([n ∑_j w_ij^2 – (∑_j w_ij)^2] / (n–1)))
+<details>
+<summary>Reference</summary>
+Box, Jenkins, Reinsel & Ljung (2015), *Time Series Analysis: Forecasting and Control*.
+</details>
+
+---
+
+## 6. Hotspot Analysis (Getis–Ord \$G\_i^\*\$)
+
+For each ZIP code \$i\$, compute:
+
+```math
+G_i^* = \frac{\sum_j w_{ij} x_j - \bar X \sum_j w_{ij}}{\sigma \sqrt{[n \sum_j w_{ij}^2 - (\sum_j w_{ij})^2]/(n -1)}},
 ```
 
-Locations with large positive Gi\* are ILI hotspots. ZIPs with <10 respondents per month were excluded.
+where \$x\_j\$ is ILI count at ZIP \$j\$, \$w\_{ij}\$ spatial weights, \$ar X\$ global mean, \$\sigma\$ global SD. Positive \$G\_i^\*\$ marks ILI hotspots. Excluded ZIPs with <10 respondents/month.
 
----
-
-## References
-
-* LA County Department of Public Health. “Los Angeles County Population Estimates (July 1, 2023).”
-* California Health Care Foundation. “Emergency Departments Almanac 2023.”
-* LA County Dept. of Public Health. “RespWatch: Influenza-Like Illness Surveillance.”
-* Smolinski MS, et al. “Flu Near You: Crowdsourced Symptom Reporting.” *Am J Public Health*, 2015.
-* Getis A, Ord JK. *Geographical Analysis*, 1992.
+<details>
+<summary>Reference</summary>
+Getis & Ord (1992), *Geographical Analysis*.
+</details>
