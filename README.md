@@ -1,3 +1,5 @@
+(Full 110-page thesis is unfortunately not publicly available). 
+
 # Methods
 
 ## 1. Epidemic Threshold Computation
