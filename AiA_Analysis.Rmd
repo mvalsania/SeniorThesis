@@ -1,0 +1,1047 @@
+---
+title: "DataAnalysis"
+author: "Marco Valsania Bacherer"
+date: "2025-03-31"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(rstudioapi)
+library(changepoint)
+library(tigris)
+library(sf)
+library(tidycensus)
+library(gridExtra)
+library(ggplot2)
+library(patchwork)
+library(spdep)
+
+# -- make sure this matches your real folder name! 
+setwd("/Users/marcovalsania/Desktop/Synthetic Data")
+
+aia3 <- read_csv("SyntheticData.csv")
+
+aia3 <- aia3 %>%
+  mutate(
+    Start = as.Date(Start),
+    week  = as.Date(week),
+    Year  = year(week)
+  )
+
+# pivot the three binary flags into a single symptom column
+aia_long <- aia3 %>%
+  pivot_longer(
+    cols      = c(Cough, CSTE, Both),
+    names_to  = "Symptom",
+    values_to = "Flag"
+  ) %>%
+  filter(Flag == 1)
+
+aia_agg <- aia_long %>%
+  group_by(Year, week, Symptom) %>%
+  summarise(Count = n(), .groups = "drop")
+
+ggplot(aia_agg, aes(x = week, y = Count, color = Symptom)) +
+  geom_line(size = 0.4) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ Year, scales = "free_x", ncol = 1) +
+  labs(
+    title = "Symptom Categories by Week Over Time",
+    x     = "Week",
+    y     = "Number of Responses",
+    color = "Symptom"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+
+
+# Plot the symptomatic categories over time (per 1,000 responses)
+ggplot(aia_agg, aes(x = week, y = Count, color = Symptom)) +
+  geom_line(size = 0.5) +
+  geom_point(size = 0.6) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(
+    title = "Symptom Categories by Week Over Time",
+    x     = "Week Ending",
+    y     = "Per 1,000 Responses",
+    color = "Symptom"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title   = element_text(face = "bold", size = 7),
+    axis.title   = element_text(size = 6),
+    axis.text    = element_text(size = 5),
+    legend.position = "top"
+  )
+
+```
+
+```{r}
+ethnic_weekly <- aia_cons %>% 
+  mutate(Group = if_else(Ethnicity == "White", "White", "POC")) %>%
+  group_by(Ethnicity, Group, week) %>% 
+  summarise(
+    TotalResp = n_distinct(id),
+    ILI_Count = sum(Sick, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(ILI_Rate = ILI_Count / TotalResp * 10000)
+
+# 2. Pivot to wide form (one column per ethnicity)
+ethnic_wide <- ethnic_weekly %>%
+  select(Ethnicity, week, ILI_Rate) %>%
+  pivot_wider(names_from = Ethnicity, values_from = ILI_Rate)
+
+# 3. Build the POC aggregate column
+poc_weekly <- ethnic_weekly %>%
+  group_by(Group, week) %>%
+  summarise(
+    TotalResp = sum(TotalResp),
+    ILI_Count = sum(ILI_Count),
+    .groups = "drop"
+  ) %>%
+  filter(Group == "POC") %>%
+  mutate(ILI_Rate = ILI_Count / TotalResp * 10000) %>%
+  select(week, POC = ILI_Rate)
+
+# 4. Merge POC back in
+ethnic_wide <- left_join(ethnic_wide, poc_weekly, by = "week")
+
+# 5. Define your five major comparisons
+major_comparisons <- list(
+  c("White",    "Hispanic"),
+  c("White",    "POC"),
+  c("White",    "Black"),
+  c("Hispanic", "Black"),
+  c("Hispanic", "Asian")
+)
+
+dev.new(width = 8, height = 12)
+
+par(
+  mfrow     = c(5, 1),
+  mar       = c(3, 4, 3, 1) + 0.1,  # a little extra top margin
+  cex.main  = 1.5,  # title size
+  cex.lab   = 1.2,  # axis label size
+  cex.axis  = 0.9   # axis tick label size
+)
+
+for(pair in major_comparisons) {
+  eth1 <- pair[1]; eth2 <- pair[2]
+  # … your code to build ts1/ts2 and ccf_res …
+
+  plot(
+    ccf_res,
+    main    = paste("CCF:", eth1, "vs.", eth2),
+    xlab    = "Lag (weeks)",
+    ylab    = "Correlation",
+    col     = "darkblue",
+    lwd     = 2
+    # you don’t need to repeat cex.* here if you set them above
+  )
+}
+```
+
+
+
+
+```{r}
+# Count responses per respondent
+id_counts <- aia3 %>%
+  group_by(id) %>%
+  summarise(ResponseCount = n(), .groups = "drop") %>%
+  arrange(desc(ResponseCount))
+
+ggplot(id_counts, aes(x = ResponseCount)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribution of Responses per ID",
+    x     = "Number of Responses",
+    y     = "Number of Respondents"
+  ) +
+  theme_minimal()
+
+
+```
+```{r}
+
+aia_quarter <- aia3 %>%
+  filter(Race != "Unknown") %>%
+  mutate(
+    Quarter = floor_date(Start, unit = "quarter", week_start = 1)
+  ) %>%
+  group_by(Quarter, Race) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Quarter) %>%
+  mutate(
+    Total      = sum(Count),
+    Percentage = Count / Total * 100
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Label        = ifelse(Percentage > 5, as.character(Count), ""),
+    QuarterLabel = paste0(substr(as.character(year(Quarter)), 3, 4), "Q", quarter(Quarter))
+  )
+
+first_quarter <- min(aia_quarter$Quarter)
+
+race_order <- aia_quarter %>%
+  filter(Quarter == first_quarter) %>%
+  arrange(desc(Percentage)) %>%
+  pull(Race)
+
+aia_quarter$Race <- factor(aia_quarter$Race, levels = race_order)
+
+ggplot(aia_quarter, aes(x = QuarterLabel, y = Percentage, fill = Race)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Label),
+            position = position_stack(vjust = 0.5),
+            size = 3, color = "white") +
+  labs(
+    title = "Race Breakdown by Quarter (excluding Unknown)",
+    x     = "Quarter",
+    y     = "Percentage of Responses",
+    fill  = "Race"
+  ) +
+  theme_minimal()
+
+```
+```{r}
+
+library(tidyverse)
+library(lubridate)
+
+aia_quarter_age <- aia3 %>%
+  filter(Age != "Unknown") %>%                  
+  mutate(
+    Quarter = floor_date(Start, unit = "quarter", week_start = 1)
+  ) %>%
+  group_by(Quarter, Age) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Quarter) %>%
+  mutate(
+    Total      = sum(Count),
+    Percentage = Count / Total * 100
+  ) %>%
+  ungroup() %>%
+  mutate(
+    Label        = ifelse(Percentage > 5, as.character(Count), ""),
+    QuarterLabel = paste0(substr(as.character(year(Quarter)), 3, 4), "Q", quarter(Quarter))
+  )
+
+age_order <- c("18–29", "30–39", "40–49", "50–59", "60–69", "70+")
+aia_quarter_age$Age <- factor(aia_quarter_age$Age, levels = age_order)
+
+ggplot(aia_quarter_age, aes(x = QuarterLabel, y = Percentage, fill = Age)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Label),
+            position = position_stack(vjust = 0.5),
+            size = 3, color = "white") +
+  labs(
+    title = "Age Breakdown by Quarter (excluding Unknown)",
+    x     = "Quarter",
+    y     = "Percentage of Responses",
+    fill  = "Age"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+aia_cons <- aia3 %>%
+  filter(Race != "Unknown") %>%  
+  mutate(Ethnicity = case_when(
+    Race == "White"  ~ "White",
+    Race == "Latino" ~ "Hispanic",
+    Race == "Black"  ~ "Black",
+    Race == "Asian"  ~ "Asian",
+    TRUE             ~ "Other"
+  ))
+
+aia_cohorts <- aia_cons %>%
+  group_by(id) %>%
+  mutate(FirstResponse = min(Start)) %>%
+  ungroup() %>%
+  mutate(Cohort = floor_date(FirstResponse, unit = "month"))
+
+aia_retention <- aia_cohorts %>%
+  mutate(ResponsePeriod = floor_date(Start, unit = "month")) %>%
+  group_by(Ethnicity, Cohort, ResponsePeriod) %>%
+  summarise(Participants = n_distinct(id), .groups = "drop") %>%
+  arrange(Ethnicity, Cohort, ResponsePeriod)
+
+aia_cohort_sizes <- aia_retention %>%
+  filter(Cohort == ResponsePeriod) %>%
+  select(Ethnicity, Cohort, CohortSize = Participants)
+
+aia_retention_rates <- aia_retention %>%
+  left_join(aia_cohort_sizes, by = c("Ethnicity", "Cohort")) %>%
+  mutate(
+    MonthsSinceCohort = interval(Cohort, ResponsePeriod) %/% months(1),
+    RetentionRate     = Participants / CohortSize
+  )
+
+ggplot(aia_retention_rates, aes(x = MonthsSinceCohort, y = Cohort, fill = RetentionRate)) +
+  geom_tile(color = "white") +
+  facet_wrap(~ Ethnicity, scales = "free_y") +
+  scale_fill_gradient(low = "white", high = "steelblue", labels = scales::percent) +
+  labs(
+    title = "Cohort Analysis (Retention Rates) by Ethnicity",
+    x     = "Months Since First Response",
+    y     = "Cohort (Month of First Response)",
+    fill  = "Retention Rate"
+  ) +
+  theme_minimal()
+```
+```{r}
+aia_cohorts_age <- aia3 %>%
+  filter(Age != "Unknown") %>% 
+  group_by(id) %>%
+  mutate(FirstResponse = min(Start)) %>%
+  ungroup() %>%
+  mutate(Cohort = floor_date(FirstResponse, unit = "month"))
+
+aia_retention_age <- aia_cohorts_age %>%
+  mutate(ResponsePeriod = floor_date(Start, unit = "month")) %>%
+  group_by(Age, Cohort, ResponsePeriod) %>%
+  summarise(Participants = n_distinct(id), .groups = "drop") %>%
+  arrange(Age, Cohort, ResponsePeriod)
+
+aia_cohort_sizes_age <- aia_retention_age %>%
+  filter(Cohort == ResponsePeriod) %>%
+  select(Age, Cohort, CohortSize = Participants)
+
+aia_retention_rates_age <- aia_retention_age %>%
+  left_join(aia_cohort_sizes_age, by = c("Age", "Cohort")) %>%
+  mutate(
+    MonthsSinceCohort = interval(Cohort, ResponsePeriod) %/% months(1),
+    RetentionRate     = Participants / CohortSize,
+    PeriodLabel      = paste0(
+                         substr(as.character(year(ResponsePeriod)), 3, 4),
+                         month(ResponsePeriod, label = TRUE, abbr = TRUE)
+                       )
+  )
+
+ggplot(aia_retention_rates_age, aes(x = MonthsSinceCohort, y = Cohort, fill = RetentionRate)) +
+  geom_tile(color = "white") +
+  facet_wrap(~ Age, scales = "free_y") +
+  scale_fill_gradient(low = "white", high = "steelblue", labels = scales::percent) +
+  labs(
+    title = "Cohort Analysis (Retention Rates) by Age Group",
+    x     = "Months Since First Response",
+    y     = "Cohort (Month of First Response)",
+    fill  = "Retention Rate"
+  ) +
+  theme_minimal()
+```
+```{r}
+aia_cons <- aia3 %>%
+  filter(Race != "Unknown") %>%
+  mutate(Ethnicity = case_when(
+    Race == "White"  ~ "White",
+    Race == "Latino" ~ "Hispanic",
+    Race == "Black"  ~ "Black",
+    Race == "Asian"  ~ "Asian",
+    TRUE             ~ "Other"
+  ))
+
+aia_person <- aia_cons %>%
+  mutate(Start = as.Date(Start)) %>%
+  group_by(id, Ethnicity) %>%
+  summarise(
+    Cohort       = floor_date(min(Start), unit = "month"),
+    LastResponse = floor_date(max(Start), unit = "month"),
+    .groups = "drop"
+  )
+
+cohort_sizes <- aia_person %>%
+  count(Ethnicity, Cohort, name = "CohortSize")
+
+all_periods <- seq(
+  from = min(aia_person$Cohort),
+  to   = max(aia_person$LastResponse),
+  by   = "month"
+)
+grid <- cohort_sizes %>%
+  mutate(Periods = map(Cohort, ~ all_periods[all_periods >= .x])) %>%
+  unnest(cols = Periods) %>%
+  rename(ResponsePeriod = Periods)
+
+aia_retention_last <- grid %>%
+  left_join(aia_person, by = c("Ethnicity","Cohort")) %>%
+  group_by(Ethnicity, Cohort, ResponsePeriod, CohortSize) %>%
+  summarise(
+    RetentionCount = sum(LastResponse >= ResponsePeriod),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    MonthsSinceCohort = interval(Cohort, ResponsePeriod) %/% months(1),
+    RetentionRate     = RetentionCount / CohortSize
+  )
+
+# 6. plot
+ggplot(aia_retention_last, aes(x = MonthsSinceCohort, y = Cohort, fill = RetentionRate)) +
+  geom_tile(color = "white") +
+  facet_wrap(~ Ethnicity, scales = "free_y") +
+  scale_fill_gradient(low = "white", high = "steelblue", labels = scales::percent) +
+  labs(
+    title = "Cohort Retention by Ethnicity (based on each person’s last response)",
+    x     = "Months Since First Response",
+    y     = "Cohort (Month of First Response)",
+    fill  = "Retention Rate"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+library(kableExtra)
+
+# 1. Compute each user’s first and last response, carry Race & Age, filter Q1 2021 cohort
+user_periods <- aia3 %>%
+  mutate(Start = as.Date(Start)) %>%
+  group_by(id) %>%
+  summarize(
+    FirstResponse = min(Start),
+    LastResponse  = max(Start),
+    Race          = first(Race),
+    Age           = first(Age),
+    .groups = "drop"
+  ) %>%
+  # group all but Asian, Black, Latino into "Other"
+  mutate(
+    RaceGroup = case_when(
+      Race %in% c("Asian","Black","Latino") ~ Race,
+      TRUE                                  ~ "Other"
+    )
+  ) %>%
+  filter(
+    !is.na(Age), Age != "Unknown",
+    FirstResponse >= as.Date("2023-01-01"),
+    FirstResponse <  as.Date("2023-04-01")
+  ) %>%
+  mutate(TenureMonths = interval(FirstResponse, LastResponse) %/% months(1))
+
+# helper to find first month where retention < 50%
+first_below_50 <- function(tenures) {
+  rates <- map_dbl(1:12, ~ mean(tenures >= .x) * 100)
+  below <- which(rates < 50)
+  if (length(below)) below[1] else NA_integer_
+}
+
+# 2. compute Race × Age cells
+corner <- user_periods %>%
+  group_by(RaceGroup, Age) %>%
+  summarize(MonthBelow50 = first_below_50(TenureMonths), .groups="drop")
+
+# 3. add race‐wide margins
+race_totals <- user_periods %>%
+  group_by(RaceGroup) %>%
+  summarize(MonthBelow50 = first_below_50(TenureMonths), .groups="drop") %>%
+  mutate(Age = "Overall")
+
+# 4. add age‐wide margins
+age_totals <- user_periods %>%
+  group_by(Age) %>%
+  summarize(MonthBelow50 = first_below_50(TenureMonths), .groups="drop") %>%
+  mutate(RaceGroup = "Overall")
+
+# 5. bind and pivot to wide table
+table_below50 <- bind_rows(corner, race_totals, age_totals) %>%
+  pivot_wider(
+    names_from  = Age,
+    values_from = MonthBelow50
+  ) %>%
+  # ensure row order: Asian, Black, Latino, Other, Overall
+  mutate(RaceGroup = factor(RaceGroup,
+    levels = c("Asian","Black","Latino","Other","Overall")
+  )) %>%
+  arrange(RaceGroup)
+
+global_total <- tibble(
+  RaceGroup     = "Overall",
+  Age           = "Overall",
+  MonthBelow50  = first_below_50(user_periods$TenureMonths)
+)
+
+# 6. bind in that global row, then pivot
+table_below50 <- bind_rows(corner, race_totals, age_totals, global_total) %>%
+  pivot_wider(
+    names_from  = Age,
+    values_from = MonthBelow50
+  ) %>%
+  mutate(RaceGroup = factor(RaceGroup,
+    levels = c("Asian","Black","Latino","Other","Overall")
+  )) %>%
+  arrange(RaceGroup)
+
+# 7. render
+knitr::kable(
+  table_below50,
+  caption = "Month at Which Retention First Drops Below 50% by Race & Age",
+  align   = "c"
+)
+```
+
+
+```{r}
+new_ids_monthly <- aia3 %>%
+  group_by(id) %>%
+  summarise(FirstDate = min(Start), .groups = "drop") %>%
+  mutate(FirstMonth = floor_date(FirstDate, unit = "month")) %>%
+  count(FirstMonth, name = "NewRespondents") %>%
+  arrange(FirstMonth)
+
+ggplot(new_ids_monthly, aes(x = FirstMonth, y = NewRespondents)) +
+  geom_line(color = "forestgreen", size = 1) +
+  geom_point(color = "forestgreen", size = 2) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+  labs(
+    title = "New Respondents per Month",
+    x     = "Month of First Response",
+    y     = "Number of New Respondents"
+  ) +
+  theme_minimal(base_size = 9)
+```
+
+
+```{r}
+library(sf)
+library(spdep)
+library(tidyverse)
+library(lubridate)
+
+# Prepare data for 2022 monthly analysis
+aia_2022 <- aia3 %>% 
+  filter(year(Start) == 2022) %>% 
+  mutate(
+    month = floor_date(Start, unit = "month"),
+    Zip = as.character(Zip)
+  )
+
+monthly_zip <- aia_2022 %>%
+  group_by(month, Zip) %>%
+  summarise(
+    Respondents = n_distinct(id),
+    Sick_Count = sum(Sick, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(Respondents >= 10) %>%  # Exclude Zips with fewer than 10 respondents explicitly
+  mutate(ILI_Rate = Sick_Count / Respondents * 10000)
+
+# Prepare spatial data explicitly
+la_zctas <- la_zctas %>% mutate(Zip = as.character(ZCTA5CE20))
+
+la_zctas_monthly <- la_zctas %>%
+  left_join(monthly_zip, by = "Zip") %>%
+  filter(!is.na(ILI_Rate))
+
+# Spatial clustering month-by-month preserving geometry explicitly
+results_list <- list()
+
+for(m in unique(la_zctas_monthly$month)) {
+  
+  subset_sf <- la_zctas_monthly %>% filter(month == m)
+  
+  # If fewer than 3 Zip codes remain, skip the month (as spatial clustering requires at least 3 units)
+  if(nrow(subset_sf) < 3) next
+  
+  coords <- st_centroid(subset_sf) %>% st_coordinates()
+  
+  # Define neighbors dynamically, ensuring not to exceed available Zip codes
+  neighbors <- knn2nb(knearneigh(coords, k = min(5, nrow(subset_sf)-1)))
+  weights <- nb2listw(neighbors, style = "W")
+  
+  subset_sf$GiStar <- as.numeric(localG(subset_sf$ILI_Rate, weights))
+  
+  results_list[[as.character(m)]] <- subset_sf
+}
+
+# Combine explicitly preserving geometry
+gi_results_sf <- do.call(rbind, results_list)
+
+# Plotting results clearly
+ggplot(gi_results_sf) +
+  geom_sf(aes(fill = GiStar, geometry = geometry), color = NA) +
+  scale_fill_gradient2(
+    low = "blue", mid = "white", high = "red",
+    midpoint = 0, name = "Gi* Z-score"
+  ) +
+  facet_wrap(~ month, ncol = 4) +
+  labs(
+    title = "Spatial Hotspot Analysis (Getis-Ord Gi*) of ILI Rates by Month (2022)",
+    subtitle = "Excluding ZIP codes with <10 respondents in each month",
+    caption = "Gi* Z-scores: High positive = Hotspot, High negative = Coldspot"
+  ) +
+  theme_minimal(base_size = 9) +
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank()
+  )
+```
+
+
+
+```{r}
+weekly_totals <- aia3 %>%
+  group_by(week) %>%
+  summarise(TotalRespondents = n_distinct(id), .groups = "drop")
+
+aia_weekly <- aia3 %>%
+  filter(Cough == 1) %>%
+  group_by(week) %>%
+  summarise(ILI_Count = n(), .groups = "drop") %>%
+  left_join(weekly_totals, by = "week") %>%
+  mutate(ILI_Rate = ILI_Count / TotalRespondents * 10000)
+
+cpt_result   <- cpt.meanvar(aia_weekly$ILI_Rate, method = "PELT", penalty = "BIC")
+change_weeks <- aia_weekly$week[cpts(cpt_result)]
+
+ggplot(aia_weekly, aes(x = week, y = ILI_Rate)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "blue", size = 2) +
+  geom_vline(xintercept = as.numeric(change_weeks), linetype = "dashed", color = "red") +
+  labs(
+    title = "Weekly ILI Rate with Detected Change Points",
+    x     = "Week",
+    y     = "ILI per 10,000 Respondents"
+  ) +
+  theme_minimal()
+
+
+```
+```{r}
+set.seed(123)
+aia_half <- aia3 %>%
+  group_by(week) %>%
+  slice_sample(prop = 0.5) %>%
+  ungroup()
+
+weekly_totals_half <- aia_half %>%
+  group_by(week) %>%
+  summarise(TotalRespondents = n_distinct(id), .groups = "drop")
+
+aia_weekly_half <- aia_half %>%
+  filter(Sick == 1) %>%
+  count(week, name = "ILI_Count") %>%
+  left_join(weekly_totals_half, by = "week") %>%
+  arrange(week) %>%
+  mutate(ILI_Rate = ILI_Count / TotalRespondents * 10000)
+
+cpt_result_half   <- cpt.meanvar(aia_weekly_half$ILI_Rate, method = "PELT", penalty = "BIC")
+change_weeks_half <- aia_weekly_half$week[cpts(cpt_result_half)]
+
+ggplot(aia_weekly_half, aes(x = week, y = ILI_Rate)) +
+  geom_line(color = "darkblue", size = 1) +
+  geom_point(color = "darkblue", size = 2) +
+  geom_vline(xintercept = as.numeric(change_weeks_half), linetype = "dashed", color = "red") +
+  labs(
+    title = "Weekly ILI Rate with Detected Change Points (50% Sample)",
+    x     = "Week",
+    y     = "ILI per 10,000 Respondents"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+
+aia_denoms <- aia_cons %>%
+  group_by(Ethnicity, week) %>%
+  summarise(TotalResp = n_distinct(id), .groups = "drop")
+
+aia_ili <- aia_cons %>%
+  filter(Sick == 1) %>%
+  group_by(Ethnicity, week) %>%
+  summarise(ILI_Count = n(), .groups = "drop")
+
+aia_weekly_rate <- left_join(aia_ili, aia_denoms, by = c("Ethnicity","week")) %>%
+  mutate(ILI_Rate = ILI_Count / TotalResp * 10000)
+
+change_points_ethnicity <- map_df(unique(aia_weekly_rate$Ethnicity), function(eth) {
+  df_eth <- filter(aia_weekly_rate, Ethnicity == eth)
+  if (nrow(df_eth) > 20) {
+    cpt <- cpt.meanvar(df_eth$ILI_Rate, method = "PELT", penalty = "BIC")
+    tibble(Ethnicity = eth, Change_Week = df_eth$week[cpts(cpt)])
+  } else {
+    tibble(Ethnicity = character(), Change_Week = as.Date(character()))
+  }
+})
+
+ggplot(aia_weekly_rate, aes(x = week, y = ILI_Rate, color = Ethnicity)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 1.5) +
+  geom_vline(
+    data = change_points_ethnicity,
+    aes(xintercept = as.numeric(Change_Week), color = Ethnicity),
+    linetype = "dashed", size = 0.7
+  ) +
+  facet_wrap(~Ethnicity, scales = "free_y") +
+  labs(
+    title = "Weekly ILI Rate per 10,000 Respondents by Ethnicity (2024)",
+    x     = "Week",
+    y     = "ILI per 10,000"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+
+
+```{r}
+
+aia_weekly_rate <- left_join(
+  aia_cons %>% group_by(Ethnicity, week) %>% summarise(TotalResp = n_distinct(id), .groups="drop"),
+  aia_cons %>% filter(Sick == 1) %>% group_by(Ethnicity, week) %>% summarise(ILI_Count = n(), .groups="drop"),
+  by = c("Ethnicity","week")
+) %>%
+  mutate(ILI_Rate = ILI_Count / TotalResp * 10000)
+
+peaks <- aia_weekly_rate %>%
+  filter(Ethnicity == "All") %>%
+  mutate(Year = year(week)) %>%
+  group_by(Year) %>%
+  slice_max(ILI_Rate, n = 1) %>%
+  ungroup() %>%
+  select(peak_week = week)
+
+p_overlay_all <- ggplot(aia_weekly_rate, aes(x = week, y = ILI_Rate, color = Ethnicity)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 1.5) +
+  geom_vline(
+    data = peaks,
+    aes(xintercept = as.numeric(peak_week)),
+    linetype = "dashed", color = "black", size = 0.7
+  ) +
+  labs(
+    title = "Weekly ILI Rate per 10,000 Respondents by Ethnicity (2024)",
+    x     = "Week",
+    y     = "ILI per 10,000 respondents",
+    color = "Ethnicity"
+  ) +
+  theme_minimal(base_size = 9)
+
+print(p_overlay_all)
+
+
+
+```
+
+```{r}
+aia_binary <- aia_cons %>%
+  mutate(Group = if_else(Ethnicity == "White", "White", "POC"))
+
+weekly_denoms <- aia_binary %>%
+  group_by(Group, week) %>%
+  summarise(TotalResp = n_distinct(id), .groups = "drop")
+
+weekly_ilis <- aia_binary %>%
+  filter(Sick == 1) %>%
+  group_by(Group, week) %>%
+  summarise(ILI_Count = n(), .groups = "drop")
+
+aia_group_weekly <- left_join(weekly_ilis, weekly_denoms, by = c("Group", "week")) %>%
+  mutate(ILI_Rate = ILI_Count / TotalResp * 10000)
+
+peaks_group <- aia_group_weekly %>%
+  mutate(Year = year(week)) %>%
+  group_by(Group, Year) %>%
+  slice_max(ILI_Rate, n = 1) %>%
+  ungroup() %>%
+  select(Group, peak_week = week)
+
+ggplot(aia_group_weekly, aes(x = week, y = ILI_Rate, color = Group)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 1.5) +
+  geom_vline(
+    data = peaks_group,
+    aes(xintercept = as.numeric(peak_week), color = Group),
+    linetype = "dashed",
+    size = 0.7
+  ) +
+  labs(
+    title = "Weekly ILI Rate per 10,000 Respondents: White vs POC",
+    x     = "Week",
+    y     = "ILI per 10,000 respondents",
+    color = "Group"
+  ) +
+  theme_minimal(base_size = 9)
+
+```
+
+
+```{r}
+options(
+  tigris_class     = "sf",
+  tigris_use_cache = TRUE
+)
+
+la_zctas   <- zctas(cb = TRUE, year = 2020)
+counties_ca <- counties(state = "06", cb = TRUE, year = 2020)
+la_county   <- counties_ca %>% filter(NAME == "Los Angeles")
+
+la_zctas <- st_transform(la_zctas, st_crs(la_county)) %>%
+  st_filter(la_county)
+
+aia_counts_18_29 <- aia3 %>%
+  filter(Age == "18–29") %>%
+  mutate(Zip = as.character(Zip)) %>%
+  group_by(Zip) %>%
+  summarise(Count18_29 = n_distinct(id), .groups = "drop")
+
+aia_zcta_counts <- la_zctas %>%
+  left_join(aia_counts_18_29, by = c("ZCTA5CE20" = "Zip")) %>%
+  mutate(Count18_29 = replace_na(Count18_29, 0)) %>%
+  filter(Count18_29 > 0)
+
+census_api_key("c68ec353e463f443efc6627c0282187939c3c67e", install = FALSE)
+acs_raw <- get_acs(
+  geography = "zcta",
+  table     = "B01001",
+  survey    = "acs5",
+  year      = 2022,
+  geometry  = FALSE,
+  output    = "wide",
+  cache_table = TRUE
+)
+
+zip_age_dist <- acs_raw %>%
+  transmute(
+    GEOID,
+    total_pop = B01001_001E,
+    age_18_29 = B01001_007E + B01001_008E + B01001_009E + B01001_010E +
+                B01001_031E + B01001_032E + B01001_033E + B01001_034E
+  ) %>%
+  mutate(pct_18_29 = age_18_29 / total_pop * 100)
+
+aia_zcta_age_18_29 <- aia_zcta_counts %>%
+  left_join(zip_age_dist, by = c("ZCTA5CE20" = "GEOID"))
+
+common_scale <- scale_fill_gradient(
+  low      = "lightyellow",
+  high     = "red",
+  na.value = "grey90"
+)
+
+p_count <- ggplot(aia_zcta_counts) +
+  geom_sf(aes(fill = Count18_29), color = "white") +
+  common_scale +
+  labs(title = "Respondents Aged 18–29 by ZipCode", fill = "# Respondents") +
+  theme_minimal(base_size=9)
+
+p_share <- ggplot(aia_zcta_age_18_29) +
+  geom_sf(aes(fill = pct_18_29), color = "white") +
+  common_scale +
+  labs(title = "Population Share Aged 18–29 by ZipCode", fill = "% Age 18–29") +
+  theme_minimal(base_size=9)
+
+grid.arrange(p_count, p_share, ncol = 2)
+
+```
+```{r}
+
+
+cutoff <- max(aia3$Start) %m-% months(3)
+aia_recent <- filter(aia3, Start >= cutoff)
+
+aia_counts_recent <- aia_recent %>%
+  filter(Age == "18–29") %>%
+  mutate(Zip = as.character(Zip)) %>%
+  group_by(Zip) %>%
+  summarise(Count18_29 = n_distinct(id), .groups = "drop") %>%
+  filter(Count18_29 > 0)
+
+aia_zcta_counts_recent <- la_zctas %>%
+  left_join(aia_counts_recent, by = c("ZCTA5CE20" = "Zip")) %>%
+  mutate(Count18_29 = replace_na(Count18_29, 0)) %>%
+  filter(Count18_29 > 0)
+
+aia_zcta_age_recent <- aia_zcta_counts_recent %>%
+  left_join(zip_age_dist, by = c("ZCTA5CE20" = "GEOID"))
+
+p_count_recent <- ggplot(aia_zcta_counts_recent) +
+  geom_sf(aes(fill = Count18_29), color = "white") +
+  common_scale +
+  labs(
+    title = "Respondents Aged 18–29 active in the last 3 months by ZipCode",
+    fill  = "# Respondents"
+  ) +
+  theme_minimal(base_size = 6)
+
+p_share_recent <- ggplot(aia_zcta_age_recent) +
+  geom_sf(aes(fill = pct_18_29), color = "white") +
+  common_scale +
+  labs(
+    title = "Population Share Aged 18–29 in those ZipCodes",
+    fill  = "% Age 18–29"
+  ) +
+  theme_minimal(base_size = 6)
+
+grid.arrange(p_count_recent, p_share_recent, ncol = 2)
+```
+```{r}
+
+respondent_counts <- aia3 %>%
+  mutate(Zip = as.character(Zip)) %>%
+  group_by(Zip) %>%
+  summarise(RespondentCount = n_distinct(id), .groups = "drop") %>%
+  filter(RespondentCount > 0)
+
+present_zips <- respondent_counts$Zip
+
+aia_zcta_respondents <- la_zctas %>%
+  filter(ZCTA5CE20 %in% present_zips) %>%
+  left_join(respondent_counts, by = c("ZCTA5CE20" = "Zip"))
+
+income_raw <- get_acs(
+  geography    = "zcta",
+  table        = "B19013",    # median household income
+  survey       = "acs5",
+  year         = 2022,
+  geometry     = FALSE,
+  output       = "wide",
+  cache_table  = TRUE
+)
+
+median_income <- income_raw %>%
+  transmute(
+    GEOID,
+    median_income = B19013_001E
+  ) %>%
+  filter(GEOID %in% present_zips)
+
+aia_zcta_income <- aia_zcta_respondents %>%
+  left_join(median_income, by = c("ZCTA5CE20" = "GEOID")) %>%
+  filter(!is.na(median_income))
+
+p_resp <- ggplot(aia_zcta_respondents) +
+  geom_sf(aes(fill = RespondentCount), color = "white") +
+  common_scale +
+  labs(
+    title = "Total Respondents by ZipCode",
+    fill  = "# Respondents"
+  ) +
+  theme_minimal(base_size = 6)
+
+p_income <- ggplot(aia_zcta_income) +
+  geom_sf(aes(fill = median_income), color = "white") +
+  common_scale +
+  labs(
+    title = "Median Household Income by ZipCode",
+    fill  = "Median Income ($)"
+  ) +
+  theme_minimal(base_size = 6)
+
+grid.arrange(p_resp, p_income, ncol = 2)
+```
+
+```{r}
+
+cutoff <- max(aia3$Start) %m-% months(4)
+aia_recent <- aia3 %>%
+  filter(Start >= cutoff)
+
+respondent_counts <- aia_recent %>%
+  mutate(Zip = as.character(Zip)) %>%
+  group_by(Zip) %>%
+  summarise(RespondentCount = n_distinct(id), .groups = "drop") %>%
+  filter(RespondentCount > 0)
+
+
+aia_zcta_income <- aia_zcta_respondents %>%
+  left_join(median_income, by = c("ZCTA5CE20" = "GEOID")) %>%
+  filter(!is.na(median_income))
+
+# 3. Plot
+p_resp <- ggplot(aia_zcta_respondents) +
+  geom_sf(aes(fill = RespondentCount), color = "white") +
+  common_scale +
+  labs(
+    title = "Respondents active in the Last 4 Months by ZipCode",
+    fill  = "# Respondents"
+  ) +
+  theme_minimal(base_size = 6)
+
+p_income <- ggplot(aia_zcta_income) +
+  geom_sf(aes(fill = median_income), color = "white") +
+  common_scale +
+  labs(
+    title = "Median Household Income by ZipCode\n(Active Respondents Only)",
+    fill  = "Median Income ($)"
+  ) +
+  theme_minimal(base_size = 6)
+
+grid.arrange(p_resp, p_income, ncol = 2)
+
+```
+
+```{r}
+
+observed_zips <- unique(as.character(aia3$Zip))
+acs_child_obs <- acs_child %>% filter(GEOID %in% observed_zips)
+
+q1 <- quantile(acs_child_obs$pct_0_17, 0.25, na.rm = TRUE)
+q3 <- quantile(acs_child_obs$pct_0_17, 0.75, na.rm = TRUE)
+
+zips_top_quartile    <- acs_child_obs %>% filter(pct_0_17 >= q3) %>% pull(GEOID)
+zips_bottom_quartile <- acs_child_obs %>% filter(pct_0_17 <= q1) %>% pull(GEOID)
+
+top_quartile_totals    <- aia3 %>% filter(Zip %in% zips_top_quartile)    %>% group_by(week) %>% summarise(Total = n_distinct(id), .groups = "drop")
+bottom_quartile_totals <- aia3 %>% filter(Zip %in% zips_bottom_quartile) %>% group_by(week) %>% summarise(Total = n_distinct(id), .groups = "drop")
+
+aia_top_quartile <- aia3 %>%
+  filter(Zip %in% zips_top_quartile, Sick == 1) %>%
+  count(week, name = "ILI_Count") %>%
+  left_join(top_quartile_totals, by = "week") %>%
+  arrange(week) %>%
+  mutate(ILI_Rate = ILI_Count / Total * 10000)
+
+aia_bottom_quartile <- aia3 %>%
+  filter(Zip %in% zips_bottom_quartile, Sick == 1) %>%
+  count(week, name = "ILI_Count") %>%
+  left_join(bottom_quartile_totals, by = "week") %>%
+  arrange(week) %>%
+  mutate(ILI_Rate = ILI_Count / Total * 10000)
+
+cpt_top    <- cpt.meanvar(aia_top_quartile$ILI_Rate,    method = "PELT", penalty = "BIC")
+cpt_bottom <- cpt.meanvar(aia_bottom_quartile$ILI_Rate, method = "PELT", penalty = "BIC")
+
+top_weeks    <- aia_top_quartile$week[cpts(cpt_top)]
+bottom_weeks <- aia_bottom_quartile$week[cpts(cpt_bottom)]
+
+aia_top_quartile$Group    <- "Top 25% Observed ZIPs by % age 0–17"
+aia_bottom_quartile$Group <- "Bottom 25% Observed ZIPs by % age 0–17"
+
+ili_combined <- bind_rows(aia_top_quartile, aia_bottom_quartile)
+
+cpts_df <- bind_rows(
+  tibble(Group = "Top 25% Observed ZIPs by % age 0–17",    Change_Week = top_weeks),
+  tibble(Group = "Bottom 25% Observed ZIPs by % age 0–17", Change_Week = bottom_weeks)
+)
+
+ggplot(ili_combined, aes(x = week, y = ILI_Rate, color = Group)) +
+  geom_line(size = 0.8) +
+  geom_point(size = 1.5) +
+  geom_vline(
+    data = cpts_df,
+    aes(xintercept = as.numeric(Change_Week), color = Group),
+    linetype = "dashed", size = 0.6
+  ) +
+  labs(
+    title = "Weekly ILI Rate: Top vs Bottom Quartile of Observed ZIPs by % age 0–17",
+    x     = "Week",
+    y     = "ILI per 10,000 Respondents"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 12))
+
+
+```
+
